@@ -189,6 +189,13 @@ type channelRequestFailureMsg struct {
 	PeersId uint32
 }
 
+type channelExitStatusMsg struct {
+	PeersId    uint32
+	Request    string
+	WantReply  bool
+	ExitStatus uint32
+}
+
 // See RFC 4254, section 5.3
 type channelCloseMsg struct {
 	PeersId uint32
@@ -237,8 +244,11 @@ func unmarshal(out interface{}, packet []byte, expectedType uint8) error {
 	if packet[0] != expectedType {
 		return UnexpectedMessageError{expectedType, packet[0]}
 	}
-	packet = packet[1:]
 
+	return Unmarshal(out, packet[1:], expectedType)
+}
+
+func Unmarshal(out interface{}, packet []byte, expectedType uint8) error {
 	v := reflect.ValueOf(out).Elem()
 	structType := v.Type()
 	var ok bool
@@ -317,6 +327,7 @@ func unmarshal(out interface{}, packet []byte, expectedType uint8) error {
 	}
 
 	return nil
+	return unmarshal(out, packet, expectedType)
 }
 
 // marshal serializes the message in msg, using the given message type.
@@ -411,6 +422,10 @@ func parseString(in []byte) (out, rest []byte, ok bool) {
 	return
 }
 
+func ParseString(in []byte) (out, rest []byte, ok bool) {
+	return parseString(in)
+}
+
 var (
 	comma         = []byte{','}
 	emptyNameList = []string{}
@@ -462,6 +477,10 @@ func parseUint32(in []byte) (uint32, []byte, bool) {
 		return 0, nil, false
 	}
 	return binary.BigEndian.Uint32(in), in[4:], true
+}
+
+func ParseUint32(in []byte) (uint32, []byte, bool) {
+	return parseUint32(in)
 }
 
 func parseUint64(in []byte) (uint64, []byte, bool) {

@@ -131,9 +131,9 @@ type Session struct {
 
 	*clientChan // the channel backing this session
 
-	started   bool // true once Start, Run or Shell is invoked.
-	copyFuncs []func() error
-	errors    chan error // one send per copyFunc
+	started bool // true once Start, Run or Shell is invoked.
+	copies  int  // how many channels are used to shuffle IO
+	errors  chan error
 
 	// true if pipe method is active
 	stdinpipe, stdoutpipe, stderrpipe bool
@@ -213,7 +213,7 @@ func (s *Session) RequestPty(term string, h, w int, termmodes TerminalModes) err
 // RequestSubsystem requests the association of a subsystem with the session on the remote host.
 // A subsystem is a predefined command that runs in the background when the ssh session is initiated
 func (s *Session) RequestSubsystem(subsystem string) error {
-	req := SubsystemRequest {
+	req := SubsystemRequest{
 		PeersId:   s.remoteId,
 		Request:   "subsystem",
 		WantReply: true,
@@ -223,13 +223,18 @@ func (s *Session) RequestSubsystem(subsystem string) error {
 	if err := s.writePacket(marshal(msgChannelRequest, req)); err != nil {
 		return err
 	}
-	return s.waitForResponse()
+
+	if err := s.waitForResponse(); err != nil {
+		return fmt.Errorf("ssh: could not execute subsystem %s: %v", subsystem, err)
+	}
+
+	return s.start()
 }
 
 func DecodeSubsystemRequest(data []byte) (*SubsystemRequest, error) {
-  req := &SubsystemRequest{}
-  err := unmarshal(req, data, msgChannelRequest)
-  return req, err
+	req := &SubsystemRequest{}
+	err := unmarshal(req, data, msgChannelRequest)
+	return req, err
 }
 
 // RFC 4254 Section 6.9.
@@ -374,17 +379,32 @@ func (s *Session) waitForResponse() error {
 func (s *Session) start() error {
 	s.started = true
 
-	type F func(*Session)
-	for _, setupFd := range []F{(*Session).stdin, (*Session).stdout, (*Session).stderr} {
-		setupFd(s)
+	copyStdin := s.stdin()
+	copyStdout := s.stdout()
+	copyStderr := s.stderr()
+
+	if copyStdout != nil {
+		s.copies++
+
+		go func() {
+			s.errors <- copyStdout()
+		}()
 	}
 
-	s.errors = make(chan error, len(s.copyFuncs))
-	for _, fn := range s.copyFuncs {
-		go func(fn func() error) {
-			s.errors <- fn()
-		}(fn)
+	if copyStdout != nil {
+		s.copies++
+
+		go func() {
+			s.errors <- copyStderr()
+		}()
 	}
+
+	if copyStdin != nil {
+		go copyStdin()
+	}
+
+	s.errors = make(chan error, s.copies)
+
 	return nil
 }
 
@@ -401,17 +421,23 @@ func (s *Session) Wait() error {
 	if !s.started {
 		return errors.New("ssh: session not started")
 	}
+
 	waitErr := s.wait()
 
 	var copyError error
-	for _ = range s.copyFuncs {
-		if err := <-s.errors; err != nil && copyError == nil {
+
+	for i := 0; i < s.copies; i++ {
+		err := <-s.errors
+
+		if err != nil && copyError == nil {
 			copyError = err
 		}
 	}
+
 	if waitErr != nil {
 		return waitErr
 	}
+
 	return copyError
 }
 
@@ -479,46 +505,51 @@ func (s *Session) wait() error {
 	return &ExitError{wm}
 }
 
-func (s *Session) stdin() {
+func (s *Session) stdin() func() error {
 	if s.stdinpipe {
-		return
+		return nil
 	}
+
 	if s.Stdin == nil {
 		s.Stdin = new(bytes.Buffer)
 	}
-	s.copyFuncs = append(s.copyFuncs, func() error {
+
+	return func() error {
 		_, err := io.Copy(s.clientChan.stdin, s.Stdin)
 		if err1 := s.clientChan.stdin.Close(); err == nil && err1 != io.EOF {
 			err = err1
 		}
 		return err
-	})
+	}
 }
 
-func (s *Session) stdout() {
+func (s *Session) stdout() func() error {
 	if s.stdoutpipe {
-		return
+		return nil
 	}
+
 	if s.Stdout == nil {
 		s.Stdout = ioutil.Discard
 	}
-	s.copyFuncs = append(s.copyFuncs, func() error {
+	return func() error {
 		_, err := io.Copy(s.Stdout, s.clientChan.stdout)
 		return err
-	})
+	}
 }
 
-func (s *Session) stderr() {
+func (s *Session) stderr() func() error {
 	if s.stderrpipe {
-		return
+		return nil
 	}
+
 	if s.Stderr == nil {
 		s.Stderr = ioutil.Discard
 	}
-	s.copyFuncs = append(s.copyFuncs, func() error {
+
+	return func() error {
 		_, err := io.Copy(s.Stderr, s.clientChan.stderr)
 		return err
-	})
+	}
 }
 
 // StdinPipe returns a pipe that will be connected to the

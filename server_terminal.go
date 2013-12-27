@@ -13,16 +13,16 @@ type Terminal interface {
 }
 
 type RequestHandler interface {
-  Handle(req ChannelRequest) bool
-  RequestSubsystem(string) bool
+	Handle(req ChannelRequest) bool
+	RequestSubsystem(string) bool
 }
 
 // ServerTerminal contains the state for running a terminal that is capable of
 // reading lines of input.
 type ServerTerminal struct {
-	Term    Terminal
-	Channel Channel
-  RequestHandler RequestHandler
+	Term           Terminal
+	Channel        Channel
+	RequestHandler RequestHandler
 }
 
 // parsePtyRequest parses the payload of the pty-req message and extracts the
@@ -64,17 +64,17 @@ func (ss *ServerTerminal) ReadLine() (line string, err error) {
 			return
 		}
 
-    if ss.RequestHandler != nil {
-      ok = ss.RequestHandler.Handle(req)
-      if ok {
-        if req.WantReply {
-          ss.Channel.AckRequest(ok)
-        }
-        continue
-      }
+		if ss.RequestHandler != nil {
+			ok = ss.RequestHandler.Handle(req)
+			if ok {
+				if req.WantReply {
+					ss.Channel.AckRequest(ok)
+				}
+				continue
+			}
 
-      // Fallthrough to the builtin handlers
-    }
+			// Fallthrough to the builtin handlers
+		}
 
 		ok = false
 		switch req.Request {
@@ -90,11 +90,11 @@ func (ss *ServerTerminal) ReadLine() (line string, err error) {
 			}
 		case "env":
 			ok = true
-    case "subsystem":
-      if ss.RequestHandler != nil {
-        out, _, _ := parseString([]byte(req.Payload))
-        ok = ss.RequestHandler.RequestSubsystem(string(out))
-      }
+		case "subsystem":
+			if ss.RequestHandler != nil {
+				out, _, _ := parseString([]byte(req.Payload))
+				ok = ss.RequestHandler.RequestSubsystem(string(out))
+			}
 		}
 		if req.WantReply {
 			ss.Channel.AckRequest(ok)

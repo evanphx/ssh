@@ -39,12 +39,18 @@ type Channel interface {
 	Write(data []byte) (int, error)
 	Close() error
 
+	// Exit sends an exit status message and closes
+	Exit(status uint) error
+
 	// Stderr returns an io.Writer that writes to this channel with the
 	// extended data type set to stderr.
 	Stderr() io.Writer
 
 	// AckRequest either sends an ack or nack to the channel request.
 	AckRequest(ok bool) error
+
+	// ReadRequest pulls any pending ChannelRequest objects
+	ReadRequest() (ChannelRequest, error)
 
 	// ChannelType returns the type of the channel, as supplied by the
 	// client.
@@ -198,6 +204,11 @@ func (c *serverChan) handlePacket(packet interface{}) {
 
 		c.pendingRequests = append(c.pendingRequests, req)
 		c.cond.Signal()
+	case *channelOpenConfirmMsg:
+		c.channel.remoteId = packet.MyId
+		c.channel.maxPacket = packet.MaxPacketSize
+		c.extraData = packet.TypeSpecificData
+		c.cond.Signal()
 	case *channelCloseMsg:
 		c.theyClosed = true
 		c.cond.Signal()
@@ -303,10 +314,6 @@ func (c *serverChan) read(data []byte) (n int, err error, windowAdjustment uint3
 	}
 
 	for {
-		if c.theySentEOF || c.theyClosed || c.dead() {
-			return 0, io.EOF, 0
-		}
-
 		if len(c.pendingRequests) > 0 {
 			req := c.pendingRequests[0]
 			if len(c.pendingRequests) == 1 {
@@ -320,6 +327,10 @@ func (c *serverChan) read(data []byte) (n int, err error, windowAdjustment uint3
 			return 0, req, 0
 		}
 
+		if c.theySentEOF || c.theyClosed || c.dead() {
+			err = io.EOF
+		}
+
 		if c.length > 0 {
 			tail := min(uint32(c.head+c.length), len(c.pendingData))
 			n = copy(data, c.pendingData[c.head:tail])
@@ -329,12 +340,20 @@ func (c *serverChan) read(data []byte) (n int, err error, windowAdjustment uint3
 				c.head = 0
 			}
 
-			windowAdjustment = uint32(len(c.pendingData)-c.length) - c.myWindow
-			if windowAdjustment < uint32(len(c.pendingData)/2) {
-				windowAdjustment = 0
+			if err == nil {
+				windowAdjustment = uint32(len(c.pendingData)-c.length) - c.myWindow
+				if windowAdjustment < uint32(len(c.pendingData)/2) {
+					windowAdjustment = 0
+				}
+				c.myWindow += windowAdjustment
 			}
-			c.myWindow += windowAdjustment
 
+			if c.length > 0 {
+				err = nil
+			}
+		}
+
+		if n > 0 || err != nil {
 			return
 		}
 
@@ -424,6 +443,44 @@ func (c *serverChan) AckRequest(ok bool) error {
 		PeersId: c.remoteId,
 	}
 	return c.writePacket(marshal(msgChannelSuccess, ack))
+}
+
+func (c *serverChan) sendExit(status uint) error {
+	c.serverConn.lock.Lock()
+	defer c.serverConn.lock.Unlock()
+
+	if c.serverConn.err != nil {
+		return c.serverConn.err
+	}
+
+	exitstatus := channelExitStatusMsg{
+		PeersId:    c.remoteId,
+		Request:    "exit-status",
+		WantReply:  false,
+		ExitStatus: uint32(status),
+	}
+	return c.writePacket(marshal(msgChannelRequest, exitstatus))
+}
+
+func (c *serverChan) Exit(status uint) error {
+	err := c.sendExit(status)
+	if err != nil {
+		return err
+	}
+	return c.Close()
+}
+
+func (c *serverChan) ReadRequest() (ChannelRequest, error) {
+	buf := make([]byte, 256)
+	_, err := c.Read(buf)
+	if err == nil {
+		return ChannelRequest{}, errors.New("ssh: no channel request")
+	}
+	req, ok := err.(ChannelRequest)
+	if !ok {
+		return ChannelRequest{}, err
+	}
+	return req, nil
 }
 
 func (c *serverChan) ChannelType() string {

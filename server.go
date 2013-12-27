@@ -118,6 +118,9 @@ type ServerConn struct {
 	// any authentication callback is called and not assigned to after that.
 	User string
 
+	// Holds the pubkey used to authenticate
+	Key PublicKey
+
 	// ClientVersion is the client's version, populated after
 	// Handshake is called. It should not be modified.
 	ClientVersion []byte
@@ -507,6 +510,46 @@ func (c *sshClientKeyboardInteractive) Challenge(user, instruction string, quest
 
 const defaultWindowSize = 32768
 
+func (s *ServerConn) NewChannel(chanType string) (Channel, error) {
+	c := &serverChan{
+		channel: channel{
+			packetConn: s,
+			remoteId:   0,
+			remoteWin:  window{Cond: newCond()},
+			maxPacket:  1 << 15,
+		},
+		chanType:    chanType,
+		extraData:   nil,
+		myWindow:    defaultWindowSize,
+		serverConn:  s,
+		cond:        newCond(),
+		pendingData: make([]byte, defaultWindowSize),
+	}
+
+	s.lock.Lock()
+	c.localId = s.nextChanId
+	s.nextChanId++
+	s.channels[c.localId] = c
+	s.lock.Unlock()
+
+	c.cond.L.Lock()
+	defer c.cond.L.Unlock()
+
+	err := c.writePacket(marshal(msgChannelOpen, channelOpenMsg{
+		ChanType:      chanType,
+		PeersId:       c.localId,
+		PeersWindow:   1 << 14,
+		MaxPacketSize: c.channel.maxPacket,
+	}))
+
+	if err != nil {
+		return nil, err
+	}
+
+	c.cond.Wait()
+	return c, nil
+}
+
 // Accept reads and processes messages on a ServerConn. It must be called
 // in order to demultiplex messages to any resulting Channels.
 func (s *ServerConn) Accept() (Channel, error) {
@@ -581,6 +624,16 @@ func (s *ServerConn) Accept() (Channel, error) {
 				s.channels[c.localId] = c
 				s.lock.Unlock()
 				return c, nil
+
+			case *channelOpenConfirmMsg:
+				s.lock.Lock()
+				c, ok := s.channels[msg.PeersId]
+				if !ok {
+					s.lock.Unlock()
+					continue
+				}
+				c.handlePacket(msg)
+				s.lock.Unlock()
 
 			case *channelRequestMsg:
 				s.lock.Lock()
