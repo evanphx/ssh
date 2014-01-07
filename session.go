@@ -223,7 +223,12 @@ func (s *Session) RequestSubsystem(subsystem string) error {
 	if err := s.writePacket(marshal(msgChannelRequest, req)); err != nil {
 		return err
 	}
-	return s.waitForResponse()
+
+	if err := s.waitForResponse(); err != nil {
+		return fmt.Errorf("ssh: could not execute subsystem %s: %v", subsystem, err)
+	}
+
+	return s.start()
 }
 
 func DecodeSubsystemRequest(data []byte) (*SubsystemRequest, error) {
